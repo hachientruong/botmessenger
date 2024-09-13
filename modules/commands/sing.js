@@ -1,144 +1,189 @@
-const fs = require('fs');
-const ytdl = require('ytdl-core');
-const { resolve } = require('path');
-const moment = require("moment-timezone");
-async function downloadMusicFromYoutube(link, path) {
-  var timestart = Date.now();
-  if(!link) return 'Thiếu link'
-  var resolveFunc = function () { };
-  var rejectFunc = function () { };
-  var returnPromise = new Promise(function (resolve, reject) {
-    resolveFunc = resolve;
-    rejectFunc = reject;
-  });
-    ytdl(link, {
-            filter: format =>
-                format.quality == 'tiny' && format.audioBitrate == 128 && format.hasAudio == true
-        }).pipe(fs.createWriteStream(path))
-        .on("close", async () => {
-            var data = await ytdl.getInfo(link)
-            var result = {
-                title: data.videoDetails.title,
-                dur: Number(data.videoDetails.lengthSeconds),
-                viewCount: data.videoDetails.viewCount,
-                likes: data.videoDetails.likes,
-                uploadDate: data.videoDetails.uploadDate,
-                sub: data.videoDetails.author.subscriber_count,
-                author: data.videoDetails.author.name,
-                timestart: timestart
-            }
-            resolveFunc(result)
-        })
-  return returnPromise
-}
-module.exports.config = {
-    name: "sing",
-    version: "1.0.0",
-    hasPermssion: 0,
-    credits: "D-Jukie",
-    description: "Phát nhạc thông qua link YouTube hoặc từ khoá tìm kiếm",
-    commandCategory: "Tìm kiếm",
-    usages: "[searchMusic]",
-    cooldowns: 0,
-}
-
-module.exports.handleReply = async function ({ api, event, handleReply }) {
-  const axios = require('axios');
-  const timeNow = moment().tz('Asia/Ho_Chi_Minh').format('HH:mm:ss');
-    const { createReadStream, unlinkSync, statSync } = require("fs-extra");
-    try {
-        var path = `${__dirname}/cache/sing-${event.senderID}.mp3`
-        var data = await downloadMusicFromYoutube('https://www.youtube.com/watch?v=' + handleReply.link[event.body -1], path);
-        if (fs.statSync(path).size > 87426214400) return api.sendMessage('Không thể gửi file, vui lòng chọn bài khác', event.threadID, () => fs.unlinkSync(path), event.messageID);
-      const inputTime = data.uploadDate;
-      const convertedTime = moment(inputTime).tz('Asia/Ho_Chi_Minh').format('DD/MM/YYYY');
-  
-        api.unsendMessage(handleReply.messageID);
-        return api.sendMessage({ 
-            body: `🎬 Title: ${data.title} (${this.convertHMS(data.dur)})\n📆 Ngày tải lên: ${convertedTime}\n🔍 Tên kênh: ${data.author} (${data.sub})\n🌐 Lượt xem: ${data.viewCount}\n⏳ Thời gian xử lý: ${Math.floor((Date.now()- data.timestart)/1000)} giây\n⏰ Time: ${timeNow}`, attachment: fs.createReadStream(path)}, event.threadID, () => fs.unlinkSync(path), event.messageID);
+const  axios = require('axios');
+const fs = require('fs-extra');
+const path = require('path');
+this.config = {
+ name: "sing",
+ version: "1.2.9",
+ hasPermssion: 0,
+ credits: "DongDev",// Thay credits làm chó
+ description: "Nghe nhạc từ nền tảng YouTube",
+ commandCategory: "Tiện ích",
+ usages: "sing + keyword",
+ cooldowns: 5,
+ images: [],
+};
+async function search(keyWord) {
+  try {
+     const res = await axios.get(`https://www.youtube.com/results?search_query=${encodeURIComponent(keyWord)}`);
+     const getJson = JSON.parse(res.data.split("ytInitialData = ")[1].split(";</script>")[0]);
+     const videos = getJson.contents.twoColumnSearchResultsRenderer.primaryContents.sectionListRenderer.contents[0].itemSectionRenderer.contents;
+     const results = [];
+     for (const video of videos)
+	 if (video.videoRenderer?.lengthText?.simpleText)
+	     results.push({
+		  id: video.videoRenderer.videoId,
+	          title: video.videoRenderer.title.runs[0].text,
+		  thumbnail: video.videoRenderer.thumbnail.thumbnails.pop().url,
+		  time: video.videoRenderer.lengthText.simpleText,
+		  channel: {
+		       id: video.videoRenderer.ownerText.runs[0].navigationEndpoint.browseEndpoint.browseId,
+		       name: video.videoRenderer.ownerText.runs[0].text,
+		       thumbnail: video.videoRenderer.channelThumbnailSupportedRenderers.channelThumbnailWithLinkRenderer.thumbnail.thumbnails.pop().url.replace(/s[0-9]+\-c/g, '-c')
+		    }
+	      });
+	return results;
+     } catch (e) {
+	const error = new Error("Cannot search video");
+	error.code = "SEARCH_VIDEO_ERROR";
+	throw error;
     }
-    catch (e) { return console.log(e) }
 }
-module.exports.convertHMS = function(value) {
-    const sec = parseInt(value, 10); 
-    let hours   = Math.floor(sec / 3600);
-    let minutes = Math.floor((sec - (hours * 3600)) / 60); 
-    let seconds = sec - (hours * 3600) - (minutes * 60); 
-    if (hours   < 10) {hours   = "0"+hours;}
-    if (minutes < 10) {minutes = "0"+minutes;}
-    if (seconds < 10) {seconds = "0"+seconds;}
-    return (hours != '00' ? hours +':': '') + minutes+':'+seconds;
+async function getData(id) {
+  id = sanitizeYouTubeId(id);
+  if (!id) throw new Error('Missing data to start the program');
+  try {
+    const formats = await getFormatsUrl(id);
+    return formats;
+  } catch (error) {
+    console.error(error);
+    throw new Error(error.message);
+  }
 }
-module.exports.run = async function ({ api, event, args }) {
-  let axios = require('axios');
-  const timeNow = moment().tz('Asia/Ho_Chi_Minh').format('HH:mm:ss');
-  if (args.length == 0 || !args) return api.sendMessage('❎ Phần tìm kiếm không được để trống!', event.threadID, event.messageID);
+function sanitizeYouTubeId(id) {
+  const match = id.match(/(?:vi\/|v=|\/v\/|youtu\.be\/|\/embed\/)([^#&?]*).*/);
+  return match ? match[1] : id;
+}
+async function getFormatsUrl(id) {
+  const url = `https://www.youtube.com/watch?v=${id}`;
+  async function convert(videoId, k) {
+  try {
+    const formData = new URLSearchParams();
+    formData.append('vid', videoId);
+    formData.append('k', k);
+    const res = await axios.post("https://9convert.com/api/ajaxConvert/convert", formData.toString());
+    return res.data;
+  } catch (err) {
+    throw new Error(err);
+  }
+}
+  const formData = new URLSearchParams();
+  formData.append('query', url);
+  formData.append('vt', 'home');
+  const response = await axios.post("https://9convert.com/api/ajaxSearch/index", formData.toString());
+  const { vid: videoId, links } = response.data;
+  const linksArray = Object.values(links).flatMap(Object.values);
+  const conversionPromises = linksArray.map(link => convert(videoId, link.k).then(result => Object.assign(link, result)));
+  await Promise.all(conversionPromises);
+  const res = links.m4a["140"];
+  return {
+    id: res.vid,
+    title: res.title,
+    url: res.dlink,
+    };
+};
+async function getStreamAndSize(url, path = "") {
+	const response = await axios({
+		method: "GET",
+		url,
+		responseType: "stream",
+		headers: {
+			'Range': 'bytes=0-'
+		}
+	});
+	if (path)
+		response.data.path = path;
+	const totalLength = response.headers["content-length"];
+	return {
+		stream: response.data,
+		size: totalLength
+	};
+}
+const MAX_SIZE = 27262976;
+this.run = async function ({ args, event, api }) {
+    const send = (msg, callback) => api.sendMessage(msg, event.threadID, callback, event.messageID);
+    if (args.length === 0 || !args) {
+        return send("❎ Phần tìm kiếm không được để trống!");
+    }
     const keywordSearch = args.join(" ");
-    var path = `${__dirname}/cache/sing-${event.senderID}.mp3`
-    if (fs.existsSync(path)) { 
-        fs.unlinkSync(path)
+    const path = `${__dirname}/cache/${event.senderID}.mp3`;
+    if (fs.existsSync(path)) {
+        fs.unlinkSync(path);
     }
-   if (args.join(" ").indexOf("https://") == 0) {
-       try {
-            var data = await downloadMusicFromYoutube(args.join(" "), path);
-            if (fs.statSync(path).size > 8742621440000) return api.sendMessage('⚠️ Không thể gửi file', event.threadID, () => fs.unlinkSync(path), event.messageID);
-      const inputTime = data.uploadDate;
-      const convertedTime = moment(inputTime).tz('Asia/Ho_Chi_Minh').format('DD/MM/YYYY');
-            return api.sendMessage({ 
-                body: `🎬 Title: ${data.title} (${this.convertHMS(data.dur)})\n📆 Ngày tải lên: ${convertedTime}\n🔍 Tên kênh: ${data.author} ( ${data.sub} )\n🌐 Lượt xem: ${data.viewCount}\n⏳ Thời gian xử lý: ${Math.floor((Date.now()- data.timestart)/1000)} giây\n⏰ Time: ${timeNow}`,
-              attachment: fs.createReadStream(path)}, event.threadID, ()=> fs.unlinkSync(path), 
-            event.messageID);
-
+    try {
+        let keyWord = keywordSearch.includes("?feature=share") ? keywordSearch.replace("?feature=share", "") : keywordSearch;
+        const maxResults = 8;
+        let result = await search(keyWord);
+        result = result.slice(0, maxResults);
+        if (result.length === 0) {
+            return send(`❎ Không có kết quả tìm kiếm nào phù hợp với từ khóa ${keyWord}`);
         }
-   catch (e) { return console.log(e) }
-    } else {
-          try {
-            var link = [],
-                msg = "",
-                num = 0,
-                numb = 0;
-            var imgthumnail = []
-     const Youtube = require('youtube-search-api');
-            var data = (await Youtube.GetListByKeyword(keywordSearch, false,12)).items;
-            for (let value of data) {
-              link.push(value.id);
-              let folderthumnail = __dirname + `/cache/${numb+=1}.png`;
-                let linkthumnail = `https://img.youtube.com/vi/${value.id}/hqdefault.jpg`;
-                let getthumnail = (await axios.get(`${linkthumnail}`, {
-                    responseType: 'arraybuffer'
-                })).data;
-                  let datac = (await axios.get(`https://www.googleapis.com/youtube/v3/videos?part=snippet&id=${value.id}&key=AIzaSyANZ2iLlzjDztWXgbCgL8Oeimn3i3qd0bE`)).data;
-                     fs.writeFileSync(folderthumnail, Buffer.from(getthumnail, 'utf-8'));
-              imgthumnail.push(fs.createReadStream(__dirname + `/cache/${numb}.png`));
-              let channel = datac.items[0].snippet.channelTitle;
-              num = num+=1
-  if (num == 1) var num1 = "1"
-  if (num == 2) var num1 = "2"
-  if (num == 3) var num1 = "3"
-  if (num == 4) var num1 = "4"
-  if (num == 5) var num1 = "5"
-  if (num == 6) var num1 = "6"
-  if (num == 7) var num1 = "7"
-  if (num == 8) var num1 = "8"
-  if (num == 9) var num1 = "9"
-  if (num == 10) var num1 = "10"
-  if (num == 11) var num1 = "11"
-  if (num == 12) var num1 = "12"
-
-              msg += (`${num1}. ${value.title}\n⏰ Time: ${value.length.simpleText}\n🌐 Tên Kênh: ${channel}\n\n`);
+        let msgg = "";
+        let i = 1;
+        const arrayID = [];
+        for (const info of result) {
+            arrayID.push(info.id);
+            msgg += `${i++}. ${info.title}\nTime: ${info.time}\nChannel: ${info.channel.name}\n\n`;
+        }
+       send({ body: `${msgg}⩺ Reply tin nhắn với số để chọn hoặc nội dung bất kì để gỡ` }, (err, info) => {
+          if (err) {
+             return send(`❎ Đã xảy ra lỗi: ${err.message}`);
+          }
+          global.client.handleReply.push({
+                name: this.config.name,
+                messageID: info.messageID,
+                author: event.senderID,
+                arrayID,
+                result,
+                path
+             });
+         });
+      } catch (err) {
+        send(`❎ Đã xảy ra lỗi: ${err.message}`);
+    }
+};
+this.handleReply = async function ({ api, event, handleReply: _ }) {
+    const send = (msg, callback) => api.sendMessage(msg, event.threadID, callback, event.messageID);
+    try {
+        const startTime = Date.now();
+        let data = _.result[event.body - 1];
+        send(`⬇️ Đang tải xuống âm thanh \"${data.title}\"`, async (erro, infom) => {
+        let { title, id, url, timestart } = await getData(data.id);
+        const savePath = _.path || `${__dirname}/cache/${event.senderID}.mp3`;               
+        const getStream = await getStreamAndSize(url, `${id}.mp3`);
+        if (getStream.size > MAX_SIZE) {
+            api.unsendMessage(infom.messageID);
+            return send(`❎ Không tìm thấy audio nào có dung lượng nhỏ hơn 26MB`);
+        }     
+        const writeStream = fs.createWriteStream(savePath);
+        getStream.stream.pipe(writeStream);
+        const contentLength = getStream.size;
+        let downloaded = 0;
+        let count = 0;
+        api.unsendMessage(_.messageID);
+        getStream.stream.on("data", (chunk) => {
+            downloaded += chunk.length;
+            count++;
+            if (count == 5) {
+                const endTime = Date.now();
+                const speed = downloaded / (endTime - startTime) * 1000;
+                const timeLeft = (contentLength / downloaded * (endTime - startTime)) / 1000;
+                const percent = downloaded / contentLength * 100;
+                if (timeLeft > 30) send(`⬇️ Đang tải xuống âm thanh \"${title}\"\n🔃 Tốc độ: ${Math.floor(speed / 1000) / 1000}MB/s\n⏸️ Đã tải: ${Math.floor(downloaded / 1000) / 1000}/${Math.floor(contentLength / 1000) / 1000}MB (${Math.floor(percent)}%)\n⏳ Ước tính thời gian còn lại: ${timeLeft.toFixed(2)} giây`);
             }
-            var body = `📝 Có ${link.length} kết quả trùng với từ khóa tìm kiếm của bạn:\n\n${msg}\nReply (phản hồi) tin nhắn này chọn một trong những tìm kiếm trên`
-            return api.sendMessage({
-              attachment: imgthumnail,
-              body: body
-            }, event.threadID, (error, info) => global.client.handleReply.push({
-              type: 'reply',
-              name: this.config.name,
-              messageID: info.messageID,
-              author: event.senderID,
-              link
-            }), event.messageID);
-          } catch(e) {
-      }
-   }
-}
+        });
+        writeStream.on("finish", () => {
+            send({
+                body: `🎬 Tiêu đề: ${title}\n👤 Tên kênh: ${data.channel.name}\n⏱️ Thời lượng: ${data.time}\n⏳ Tốc độ xử lý: ${Math.floor((Date.now() - startTime) / 1000)} giây`,
+                attachment: fs.createReadStream(savePath)
+            }, async (err) => {
+                if (err)
+                    return send(`❎ Đã xảy ra lỗi: ${err.message}`);
+                fs.unlinkSync(savePath);
+               });
+           });
+            api.unsendMessage(infom.messageID);
+       });
+    } catch (error) {
+        send(`❎ Đã xảy ra lỗi: ${error.message}`);
+    }
+};
